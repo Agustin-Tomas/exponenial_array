@@ -1,0 +1,126 @@
+package exponential_array
+
+import intrinsics "base:intrinsics"
+import "core:mem"
+import "core:slice"
+
+backing_int :: u32
+
+
+Handle :: struct {
+    gen: u32,
+    idx: u32,
+}
+
+
+// No es responsable de la memoria que ocupa.
+Handle_Map :: struct($T: typeid, $N_Chunks: int = 64, $Initial_Capacity: int = 8)
+    where
+        intrinsics.type_is_specialization_of(Backing_Exponential_Array, Header),
+        intrinsics.type_has_field (T, "handle"),
+        intrinsics.type_field_type(T, "handle") == Handle_Type
+{
+    handle_map_base: uintptr,
+    slot_array: Header(Handle, N_Chunks, Initial_Capacity), // Listado ordenado de metadatos actuales de redirección entre un  de handles y la direcció hacia su objetos asociado.
+    item_stack: Header(T, N_Chunks, Initial_Capacity), // Objetos presentes cuyos ordenamientos particulares en lugar y tiempo son fortuitos e independientes.
+    free_slot_stack: Header(int, N_Chunks, Initial_Capacity), // Listado apilado desordenado de posiciones disponibles actualmente en el dense_array
+}
+
+
+// levantar un handle_map virgen
+settle_handle_map :: proc(hm: ^Handle_Map($T, $N_Chunks, $Initial_Capacity), base: rawptr) {
+    hm.handle_map_base = uintptr(base)
+    hm.slot_array.base = hm.handle_map_base
+    hm.item_stack.base = hm.handle_map_base
+    hm.free_slot_stack.base = hm.handle_map_base
+}
+
+// reubicar un handle_map
+
+
+_free_list_pop :: proc(hm: ^Handle_Map($T, $N_Chunks, $Initial_Capacity)) -> (slot_idx: int, ok: bool) {
+    l := hm.free_slot_stack.length
+
+    if l == 0 {
+        return 0, false
+    }
+
+
+    slot_idx = get_item(&hm.free_slot_stack, l) or_return
+    hm.free_slot_stack.length -= 1
+
+    return slot_idx, true
+
+
+}
+
+
+_grow_handle_map_capacity :: proc(hm: ^Handle_Map($T, $N_Chunks, $Initial_Capacity)) -> (ok: bool, errors: mem.Allocator_Error) {
+    old_total_capacity := _total_capacity(hm.slot_array)
+
+    ok_1, alloc_err_1 := _allocate_new_chunk(&hm.slot_array)
+    ok_2, alloc_err_2 := _allocate_new_chunk(&hm.item_stack)
+    ok_3, alloc_err_3 := _allocate_new_chunk(&hm.free_slot_stack)
+
+    ok = ok_1 && ok_2 && ok_3
+    if !ok {
+        if alloc_err_1 != nil do return ok, alloc_err_1
+        if alloc_err_2 != nil do return ok, alloc_err_2
+        if alloc_err_3 != nil do return ok, alloc_err_3
+    }
+
+    if ok {
+        /* Update free-list to include newly created spaces*/
+        new_chunk_capacity := _chunk_capacity(hm.slot_array.n_allocated_chunks-1, hm.item_stack)
+        #reverse for i in 0..<new_capacity {
+            append_item(&hm.free_slot_stack, old_total_capacity + i)
+        }
+    }
+
+    return
+}
+
+add_item :: proc(hm: ^Handle_Map($T, $N_Chunks, $Initial_Capacity), item: T) -> (handle: Handle, ok: bool)
+    where
+        intrinsics.type_is_specialization_of(Backing_Exponential_Array, Header),
+        intrinsics.type_has_field (T, "handle"),
+        intrinsics.type_field_type(T, "handle") == Handle_Type
+ {
+
+    empity_slot_idx, pop_ok := _free_list_pop(hm)
+    for !pop_ok {
+         /* Intentar crecer el array */
+        ok_allocator, allocator_errors := _grow_handle_map_capacity(hm)
+        if !ok_allocator {
+            return
+        }
+        empity_slot_idx, pop_ok = _free_list_pop(hm)
+    }
+
+
+    new_item_idx := hm.item_stack.length
+    new_item_gen := 0
+    // determinar gen number
+    slot := get_item_ptr(&hm.slot_array, empity_slot_idx) or_return
+    slot.gen += 1
+
+    item := item
+
+    internal_handle := Handle{gen = slot.gen, idx = new_item_idx}
+
+    item.handle = internal_handle
+
+    append_ok := append_item(hm, item)
+    if !append_ok {
+        return
+    }
+
+    external_handle := Handle{gen = slot.gen, idx = empity_slot_idx}
+
+    return external_handle, true
+}
+
+// delete item
+
+//
+
